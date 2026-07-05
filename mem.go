@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/gammazero/deque"
 )
 
 type EventType int
@@ -47,7 +49,7 @@ func (s *Store) GetRawValue(key string) any {
 		switch v := val.data.(type) {
 		case string:
 			return v
-		case []any:
+		case deque.Deque[any]:
 			return v
 		default:
 			panic(fmt.Sprintf("Unknown internal type: %v", val.data))
@@ -82,7 +84,7 @@ func (s *Store) HandleEvent(ev Event) error {
 	case EventCmd:
 		msg := ev.Data.(Array)
 		if cmd, ok := msg.elements[0].(BulkString); ok {
-			switch strings.ToUpper(cmd.content) {
+			switch command := strings.ToUpper(cmd.content); command {
 			case "PING":
 				WriteWithBail(ev.conn, []byte("+PONG\r\n"))
 			case "ECHO":
@@ -119,25 +121,29 @@ func (s *Store) HandleEvent(ev Event) error {
 					ts:   expired,
 				}
 				WriteWithBail(ev.conn, OK)
-			case "RPUSH":
+			case "RPUSH", "LPUSH":
 				listKey := msg.elements[1].(BulkString).content
 				val := s.GetRawValue(listKey)
 				if val == nil {
 					s.store[listKey] = Item{
-						data: make([]any, 0, 5),
+						data: deque.Deque[any]{},
 						ts:   -1,
 					}
 				}
 				values := msg.elements[2:]
-				cur := s.store[listKey].data.([]any)
+				cur := s.store[listKey].data.(deque.Deque[any])
 				for _, v := range values {
-					cur = append(cur, v)
+					if command == "RPUSH" {
+						cur.PushBack(v)
+					} else {
+						cur.PushFront(v)
+					}
 				}
 				s.store[listKey] = Item{
 					data: cur,
 					ts:   -1,
 				}
-				WriteWithBail(ev.conn, Integer{int64(len(cur))}.Encode())
+				WriteWithBail(ev.conn, Integer{int64(cur.Len())}.Encode())
 			case "LRANGE":
 				listKey := msg.elements[1].(BulkString).content
 				val := s.GetRawValue(listKey)
@@ -145,17 +151,17 @@ func (s *Store) HandleEvent(ev Event) error {
 					WriteWithBail(ev.conn, Array{}.Encode())
 					return nil
 				}
-				cur := s.store[listKey].data.([]any)
+				cur := s.store[listKey].data.(deque.Deque[any])
 
 				start := ToInt(msg.elements[2])
 				if start < 0 {
-					start = max(start+len(cur), 0)
+					start = max(start+cur.Len(), 0)
 				}
 				end := ToInt(msg.elements[3])
 				if end < 0 {
-					end = max(end+len(cur), 0)
+					end = max(end+cur.Len(), 0)
 				}
-				end = min(end, len(cur)-1)
+				end = min(end, cur.Len()-1)
 				log.Printf("LRANGE: [%d, %d]", start, end)
 
 				res := Array{
@@ -163,7 +169,7 @@ func (s *Store) HandleEvent(ev Event) error {
 				}
 
 				for i := start; i <= end; i++ {
-					res.elements[i-start] = cur[i].(RESP)
+					res.elements[i-start] = cur.At(i).(RESP)
 				}
 				WriteWithBail(ev.conn, res.Encode())
 			default:
