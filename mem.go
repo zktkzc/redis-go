@@ -147,8 +147,16 @@ func (s *Store) HandleEvent(ev Event) error {
 				}
 				cur := s.store[listKey].data.([]any)
 
-				start := max(ToInt(msg.elements[2]), 0)
-				end := min(ToInt(msg.elements[3]), len(cur)-1)
+				start := ToInt(msg.elements[2])
+				if start < 0 {
+					start = max(start+len(cur), 0)
+				}
+				end := ToInt(msg.elements[3])
+				if end < 0 {
+					end = max(end+len(cur), 0)
+				}
+				end = min(end, len(cur)-1)
+				log.Printf("LRANGE: [%d, %d]", start, end)
 
 				res := Array{
 					elements: make([]RESP, end-start+1),
