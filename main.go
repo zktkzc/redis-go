@@ -9,12 +9,9 @@ import (
 	"os"
 )
 
-func WriteWithBail(conn net.Conn, data []byte) {
-	_, err := conn.Write(data)
-	if err != nil {
-		log.Printf("Error writing to connection(%v): %v", conn.RemoteAddr(), err.Error())
-		os.Exit(1)
-	}
+func SettleClient(client chan Client, key string, status any) {
+	cs := Client{key, status}
+	client <- cs
 }
 
 func main() {
@@ -41,6 +38,7 @@ func main() {
 			scanner := bufio.NewScanner(conn)
 			scanner.Split(split)
 			decoder := Decoder{s: scanner}
+			respCh := make(chan Client)
 			for scanner.Scan() {
 				data := scanner.Bytes()
 				log.Printf("Received line(%v): %v", conn.RemoteAddr(), data)
@@ -56,7 +54,24 @@ func main() {
 					log.Printf("message(bulk string): %v", msg)
 				case Array:
 					log.Printf("message(array): %v", msg)
-					events <- Event{Type: EventCmd, Data: msg, conn: conn}
+					events <- Event{Type: EventCmd, data: msg, client: respCh}
+					resp := <-respCh
+					status := resp.status
+					switch s := status.(type) {
+					case []byte:
+						_, err := conn.Write(s)
+						if err != nil {
+							log.Printf("Error writing to connection %v: %v", conn.RemoteAddr(), err.Error())
+							os.Exit(1)
+						}
+					case BlockingListStatus:
+						data := <-s.data
+						_, err := conn.Write(data)
+						if err != nil {
+							log.Printf("Error writing to connection %v: %v", conn.RemoteAddr(), err.Error())
+							os.Exit(1)
+						}
+					}
 				default:
 					panic("Unknown message type")
 				}
