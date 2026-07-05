@@ -49,7 +49,7 @@ func (s *Store) GetRawValue(key string) any {
 		switch v := val.data.(type) {
 		case string:
 			return v
-		case deque.Deque[any]:
+		case *deque.Deque[any]:
 			return v
 		default:
 			panic(fmt.Sprintf("Unknown internal type: %v", val.data))
@@ -126,12 +126,12 @@ func (s *Store) HandleEvent(ev Event) error {
 				val := s.GetRawValue(listKey)
 				if val == nil {
 					s.store[listKey] = Item{
-						data: deque.Deque[any]{},
+						data: &deque.Deque[any]{},
 						ts:   -1,
 					}
 				}
 				values := msg.elements[2:]
-				cur := s.store[listKey].data.(deque.Deque[any])
+				cur := s.store[listKey].data.(*deque.Deque[any])
 				for _, v := range values {
 					if command == "RPUSH" {
 						cur.PushBack(v)
@@ -144,6 +144,41 @@ func (s *Store) HandleEvent(ev Event) error {
 					ts:   -1,
 				}
 				WriteWithBail(ev.conn, Integer{int64(cur.Len())}.Encode())
+			case "LPOP", "RPOP":
+				listKey := msg.elements[1].(BulkString).content
+				val := s.GetRawValue(listKey)
+				if val == nil {
+					WriteWithBail(ev.conn, nullBulkString)
+					return nil
+				}
+				cur := s.store[listKey].data.(*deque.Deque[any])
+				if cur.Len() == 0 {
+					WriteWithBail(ev.conn, nullBulkString)
+					return nil
+				}
+				num := 1
+				res := Array{[]RESP{}}
+				isArray := false
+				if len(msg.elements) >= 3 {
+					num = ToInt(msg.elements[2])
+					isArray = true
+				}
+				for num > 0 {
+					if cur.Len() == 0 {
+						break
+					}
+					if command == "RPOP" {
+						res.elements = append(res.elements, cur.PopBack().(RESP))
+					} else {
+						res.elements = append(res.elements, cur.PopFront().(RESP))
+					}
+					num -= 1
+				}
+				if isArray {
+					WriteWithBail(ev.conn, res.Encode())
+				} else {
+					WriteWithBail(ev.conn, res.elements[0].Encode())
+				}
 			case "LRANGE":
 				listKey := msg.elements[1].(BulkString).content
 				val := s.GetRawValue(listKey)
@@ -151,7 +186,7 @@ func (s *Store) HandleEvent(ev Event) error {
 					WriteWithBail(ev.conn, Array{}.Encode())
 					return nil
 				}
-				cur := s.store[listKey].data.(deque.Deque[any])
+				cur := s.store[listKey].data.(*deque.Deque[any])
 
 				start := ToInt(msg.elements[2])
 				if start < 0 {
@@ -177,7 +212,7 @@ func (s *Store) HandleEvent(ev Event) error {
 				val := s.GetRawValue(listKey)
 				res := Integer{0}
 				if val != nil {
-					cur := s.store[listKey].data.(deque.Deque[any])
+					cur := s.store[listKey].data.(*deque.Deque[any])
 					res.content = int64(cur.Len())
 				}
 				WriteWithBail(ev.conn, res.Encode())
