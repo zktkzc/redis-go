@@ -106,6 +106,8 @@ func (s *Store) GetRawValue(key string) (any, string) {
 			return v, "string"
 		case *BlockableList:
 			return v, "list"
+		case *Stream:
+			return v, "stream"
 		default:
 			panic(fmt.Sprintf("[ERROR] Unsupported internal type: %T", val.data))
 		}
@@ -166,6 +168,24 @@ func (s *Store) HandleEvent(ev Event) error {
 		msg := ev.data.(Array)
 		if cmd, ok := msg.elements[0].(BulkString); ok {
 			switch command := strings.ToUpper(cmd.content); command {
+			case "XADD":
+				streamKey := msg.elements[1].(BulkString).content
+				id := msg.elements[2].(BulkString).content
+				key := msg.elements[3].(BulkString).content
+				value := msg.elements[4].(BulkString).content
+
+				val, t := s.GetRawValue(streamKey)
+				if val == nil {
+					s.store[streamKey] = Item{data: &Stream{key: streamKey, entries: []*Entry{}}, ts: -1}
+				} else {
+					if t != "stream" {
+						panic(fmt.Sprintf("[ERROR] XADD: %v is %s, not 'stream'", id, t))
+					}
+				}
+
+				stream := s.store[streamKey].data.(*Stream)
+				stream.entries = append(stream.entries, &Entry{id, key, value})
+				SettleClient(ev.client, "", BulkString{id}.Encode())
 			case "PING":
 				SettleClient(ev.client, "", []byte("+PONG\r\n"))
 			case "ECHO":

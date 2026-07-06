@@ -23,6 +23,17 @@ type BulkString struct {
 	content string
 }
 
+type Entry struct {
+	id    string
+	key   string
+	value string
+}
+
+type Stream struct {
+	key     string
+	entries []*Entry
+}
+
 type Decoder struct {
 	s *bufio.Scanner
 }
