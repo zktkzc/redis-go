@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type RESP interface {
@@ -28,9 +29,45 @@ type SimpleError struct {
 	msg string
 }
 
-type EntryId string
+type (
+	EntryID    string
+	EidGenType int
+)
 
-func (a EntryId) Validate() (bool, int64, int64) {
+const (
+	ManualEID      EidGenType = 0
+	PartialAutoEID EidGenType = 1
+	FullAutoEID    EidGenType = 2
+	ErrorEID       EidGenType = 255
+)
+
+func (a EntryID) AutoGenID(lastID EntryID) (EidGenType, EntryID) {
+	_, lastTS, lastSid := lastID.Validate()
+	ida := strings.SplitN(string(a), "-", 2)
+	sid := 0
+	if len(ida) < 2 {
+		if ida[0] == "*" {
+			now := time.Now().UnixMilli()
+			if now == lastTS {
+				sid = int(lastSid) + 1
+			}
+			return FullAutoEID, EntryID(strconv.Itoa(int(now)) + "-" + strconv.Itoa(sid))
+		}
+		return ErrorEID, ""
+	}
+
+	if ida[1] == "*" {
+		ts, _ := strconv.ParseInt(ida[0], 10, 64)
+		if ts == lastTS {
+			sid = int(lastSid) + 1
+		}
+		return PartialAutoEID, EntryID(ida[0] + "-" + strconv.Itoa(sid))
+	}
+
+	return ManualEID, a
+}
+
+func (a EntryID) Validate() (bool, int64, int64) {
 	ida := strings.SplitN(string(a), "-", 2)
 	if len(ida) < 2 {
 		return false, 0, 0
@@ -46,7 +83,7 @@ func (a EntryId) Validate() (bool, int64, int64) {
 	return true, ts, id
 }
 
-func (a EntryId) Greater(b EntryId) bool {
+func (a EntryID) Greater(b EntryID) bool {
 	v1, ts1, id1 := a.Validate()
 	v2, ts2, id2 := b.Validate()
 	if !v1 || !v2 {
@@ -59,7 +96,7 @@ func (a EntryId) Greater(b EntryId) bool {
 }
 
 type Entry struct {
-	id    EntryId
+	id    EntryID
 	key   string
 	value string
 }
@@ -67,7 +104,7 @@ type Entry struct {
 type Stream struct {
 	key     string
 	entries map[string]*Entry
-	lastId  EntryId
+	lastID  EntryID
 }
 
 type Decoder struct {

@@ -171,18 +171,10 @@ func (s *Store) HandleEvent(ev Event) error {
 			case "XADD":
 				streamKey := msg.elements[1].(BulkString).content
 				id := msg.elements[2].(BulkString).content
-				eid := EntryId(id)
-				ok, ts, seqId := eid.Validate()
-				if !ok || ts == 0 && seqId == 0 {
-					SettleClient(ev.client, streamKey, SimpleError{"ERR The ID specified in XADD must be greater than 0-0"}.Encode())
-					return nil
-				}
-				key := msg.elements[3].(BulkString).content
-				value := msg.elements[4].(BulkString).content
 
 				val, t := s.GetRawValue(streamKey)
 				if val == nil {
-					s.store[streamKey] = Item{data: &Stream{key: streamKey, entries: map[string]*Entry{}, lastId: "0-0"}, ts: -1}
+					s.store[streamKey] = Item{data: &Stream{key: streamKey, entries: map[string]*Entry{}, lastID: "0-0"}, ts: -1}
 				} else {
 					if t != "stream" {
 						panic(fmt.Sprintf("[ERROR] XADD: %v is %s, not 'stream'", id, t))
@@ -190,13 +182,24 @@ func (s *Store) HandleEvent(ev Event) error {
 				}
 
 				stream := s.store[streamKey].data.(*Stream)
-				if !eid.Greater(stream.lastId) {
+
+				_, eid := EntryID(id).AutoGenID(stream.lastID)
+				log.Printf("[INFO] Auto gen entry id for %v: %v", id, eid)
+				ok, ts, seqID := eid.Validate()
+				if !ok || (ts == 0 && seqID == 0) {
+					SettleClient(ev.client, streamKey, SimpleError{"ERR The ID specified in XADD must be greater than 0-0"}.Encode())
+					return nil
+				}
+				key := msg.elements[3].(BulkString).content
+				value := msg.elements[4].(BulkString).content
+				if !eid.Greater(stream.lastID) {
 					SettleClient(ev.client, "", SimpleError{"ERR the ID specified in XADD is euqal or smaller than the target stream top item"}.Encode())
 					return nil
 				}
+
 				stream.entries[id] = &Entry{eid, key, value}
-				stream.lastId = eid
-				SettleClient(ev.client, "", BulkString{id}.Encode())
+				stream.lastID = eid
+				SettleClient(ev.client, "", BulkString{string(eid)}.Encode())
 			case "PING":
 				SettleClient(ev.client, "", []byte("+PONG\r\n"))
 			case "ECHO":
