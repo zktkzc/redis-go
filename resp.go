@@ -30,6 +30,7 @@ type Decoder struct {
 // 常量
 var (
 	nullBulkString = []byte("$-1\r\n")
+	nullArray      = []byte("*-1\r\n")
 	OK             = []byte("+OK\r\n")
 )
 
@@ -68,7 +69,7 @@ func (arr Array) Encode() []byte {
 func (d *Decoder) Decode(data []byte) (RESP, error) {
 	header, content, found := bytes.Cut(data, []byte{'\r', '\n'})
 	if !found {
-		panic("Failed to decode bulk string")
+		panic(fmt.Sprintf("[ERROR] Failed to decode bulk string, there is no '\r\n' in %v", data))
 	}
 
 	t := header[0]
@@ -76,34 +77,34 @@ func (d *Decoder) Decode(data []byte) (RESP, error) {
 	case ':': // integers
 		value, err := strconv.ParseInt(string(header[1:]), 10, 64)
 		if err != nil {
-			panic(fmt.Sprintf("Failed to decode bulk string: %v", err.Error()))
+			panic(fmt.Sprintf("[ERROR] Failed to decode bulk string: %v", err.Error()))
 		}
 		return Integer{value}, nil
 	case '$': // bulk string
 		length, err := strconv.ParseInt(string(header[1:]), 10, 64)
 		if err != nil {
-			panic(fmt.Sprintf("Failed to decode bulk string: %v", err.Error()))
+			panic(fmt.Sprintf("[ERROR] Failed to decode bulk string: %v", err.Error()))
 		}
 		return BulkString{string(content[:length])}, nil
 	case '*':
 		count, err := strconv.ParseInt(string(header[1:]), 10, 64)
 		if err != nil {
-			panic(fmt.Sprintf("Failed to decode bulk string: %v", err.Error()))
+			panic(fmt.Sprintf("[ERROR] Failed to decode bulk string: %v", err.Error()))
 		}
 		arr := Array{elements: make([]RESP, int(count))}
 		for i := 0; i < int(count); i++ {
 			if d.s.Scan() {
 				arr.elements[i], err = d.Decode(d.s.Bytes())
 				if err != nil {
-					panic(fmt.Sprintf("Failed to decode array: %v", err.Error()))
+					panic(fmt.Sprintf("[ERROR] Failed to decode array: %v", err.Error()))
 				}
 			} else {
-				panic(fmt.Sprintf("Failed to decode array: %v", d.s.Err()))
+				panic(fmt.Sprintf("[ERROR] Failed to decode array: %v", d.s.Err()))
 			}
 		}
 		return arr, nil
 	default:
-		panic(fmt.Sprintf("Not supported: %v", t))
+		panic(fmt.Sprintf("[ERROR] Not supported: %v", t))
 	}
 }
 
@@ -136,6 +137,6 @@ func split(data []byte, _ bool) (advance int, token []byte, err error) {
 		totalLength := len(header) + 2
 		return totalLength, data[:totalLength], nil
 	default:
-		panic(fmt.Sprintf("Not supported: %v", t))
+		panic(fmt.Sprintf("[ERROR] Not supported: %v", t))
 	}
 }

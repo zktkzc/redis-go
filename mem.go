@@ -15,11 +15,14 @@ import (
 type EventType int
 
 const (
-	EventCmd = iota
+	EventCmd                      = iota
+	EventCheckBlockingListTimeout = iota
 )
 
 type BlockingListStatus struct {
-	data chan []byte
+	data    chan []byte
+	start   int64
+	timeout int64
 }
 
 type Client struct {
@@ -39,25 +42,59 @@ type Item struct {
 }
 
 type Store struct {
-	store           map[string]Item
-	t               *time.Ticker
-	blockingClients map[string][]*Client
+	store map[string]Item
+	t     *time.Ticker
+	ch    chan Event
 }
 
-func NewStore() *Store {
+func NewStore(ch chan Event) *Store {
 	return &Store{
-		store:           make(map[string]Item),
-		t:               time.NewTicker(1 * time.Second),
-		blockingClients: make(map[string][]*Client),
+		store: map[string]Item{},
+		t:     time.NewTicker(1 * time.Second),
+		ch:    ch,
 	}
 }
 
 type BlockableList struct {
-	list deque.Deque[any]
+	key             string
+	list            deque.Deque[any]
+	blockingClients []*Client
+	close           chan int
+	eventCh         chan Event
 }
 
-func NewBlockableList() *BlockableList {
-	return &BlockableList{deque.Deque[any]{}}
+const (
+	Close     = 0
+	ListAdded = 1
+)
+
+func NewBlockableList(key string, eventCh chan Event) *BlockableList {
+	bl := &BlockableList{
+		key,
+		deque.Deque[any]{},
+		[]*Client{},
+		make(chan int),
+		eventCh,
+	}
+
+	go func() {
+		t := time.NewTicker(50 * time.Millisecond)
+	loop:
+		for {
+			select {
+			case <-t.C:
+				eventCh <- Event{
+					Type: EventCheckBlockingListTimeout,
+					data: key,
+				}
+			case <-bl.close:
+				log.Printf("[INFO] Block list closed.")
+				break loop
+			}
+		}
+	}()
+
+	return bl
 }
 
 func (s *Store) GetRawValue(key string) any {
@@ -70,7 +107,7 @@ func (s *Store) GetRawValue(key string) any {
 		case *BlockableList:
 			return v
 		default:
-			panic(fmt.Sprintf("Unknown internal type: %v", val.data))
+			panic(fmt.Sprintf("[ERROR] Unknown internal type: %v", val.data))
 		}
 	}
 }
@@ -87,36 +124,22 @@ func (s *Store) NonBlockingLPOP(key string) (RESP, bool) {
 	return cur.list.PopFront().(RESP), true
 }
 
-func (s *Store) Start(ctx context.Context, ch <-chan Event) {
+func (s *Store) Start(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			log.Printf("loop cancelled")
+			log.Printf("[INFO] Loop cancelled")
 		case <-s.t.C:
-			log.Printf("store timely work")
-			for k, clients := range s.blockingClients {
-				log.Printf("Processing blocking key %v...", k)
-				for _, c := range clients {
-					v, got := s.NonBlockingLPOP(c.blockingKey)
-					if !got {
-						break
-					}
-					res := Array{[]RESP{
-						BulkString{k},
-						v,
-					}}
-					c.status.(BlockingListStatus).data <- res.Encode()
-				}
-			}
-		case ev, ok := <-ch:
+			log.Printf("[INFO] Store timely work")
+		case ev, ok := <-s.ch:
 			if !ok {
-				log.Printf("event channel closed")
+				log.Printf("[ERROR] Event channel closed")
 			}
 
-			log.Printf("event: %v", ev)
+			log.Printf("[INFO] Event: %v", ev)
 			err := s.HandleEvent(ev)
 			if err != nil {
-				log.Printf("Error handling event: %v", err.Error())
+				log.Printf("[ERROR] Error handling event: %v", err.Error())
 				os.Exit(1)
 			}
 		}
@@ -125,6 +148,20 @@ func (s *Store) Start(ctx context.Context, ch <-chan Event) {
 
 func (s *Store) HandleEvent(ev Event) error {
 	switch ev.Type {
+	case EventCheckBlockingListTimeout:
+		key := ev.data.(string)
+		cur := s.store[key].data.(*BlockableList)
+		next := []*Client{}
+		for i, c := range cur.blockingClients {
+			s := c.status.(BlockingListStatus)
+			if time.Now().UnixMilli()-s.start >= s.timeout {
+				log.Printf("[INFO] Client removed: %d", i)
+				s.data <- nullArray
+			} else {
+				next = append(next, c)
+			}
+		}
+		cur.blockingClients = next
 	case EventCmd:
 		msg := ev.data.(Array)
 		if cmd, ok := msg.elements[0].(BulkString); ok {
@@ -156,7 +193,7 @@ func (s *Store) HandleEvent(ev Event) error {
 						case "PX":
 							expired = time.Now().Add(time.Duration(t) * time.Millisecond).UnixMilli()
 						default:
-							panic(fmt.Sprintf("Unknown expiry: %v", ex))
+							panic(fmt.Sprintf("[ERROR] Unknown expiry: %v", ex))
 						}
 					}
 				}
@@ -170,7 +207,7 @@ func (s *Store) HandleEvent(ev Event) error {
 				val := s.GetRawValue(listKey)
 				if val == nil {
 					s.store[listKey] = Item{
-						data: NewBlockableList(),
+						data: NewBlockableList(listKey, s.ch),
 						ts:   -1,
 					}
 				}
@@ -187,6 +224,21 @@ func (s *Store) HandleEvent(ev Event) error {
 					data: cur,
 					ts:   -1,
 				}
+
+				next := []*Client{}
+				for _, c := range cur.blockingClients {
+					v, got := s.NonBlockingLPOP(c.blockingKey)
+					if got {
+						res := Array{[]RESP{
+							BulkString{c.blockingKey},
+							v,
+						}}
+						c.status.(BlockingListStatus).data <- res.Encode()
+					} else {
+						next = append(next, c)
+					}
+				}
+				cur.blockingClients = next
 				SettleClient(ev.client, listKey, Integer{int64(cur.list.Len())}.Encode())
 			case "LPOP", "RPOP":
 				listKey := msg.elements[1].(BulkString).content
@@ -228,20 +280,29 @@ func (s *Store) HandleEvent(ev Event) error {
 				val := s.GetRawValue(listKey)
 				if val == nil {
 					s.store[listKey] = Item{
-						data: NewBlockableList(),
+						data: NewBlockableList(listKey, s.ch),
 						ts:   -1,
 					}
 				}
 				cur := s.store[listKey].data.(*BlockableList)
+				var timeout float64 = 24 * 365 * 10 * 3600
+				if len(msg.elements) >= 3 {
+					timeout = ToFloat(msg.elements[2]) * 1000
+				}
 				if cur.list.Len() == 0 {
 					blstatus := BlockingListStatus{
-						data: make(chan []byte),
+						data:    make(chan []byte),
+						start:   time.Now().UnixMilli(),
+						timeout: int64(timeout),
 					}
-					s.blockingClients[listKey] = append(s.blockingClients[listKey], &Client{listKey, blstatus})
+					cur.blockingClients = append(cur.blockingClients, &Client{listKey, blstatus})
 					SettleClient(ev.client, listKey, blstatus)
 				} else {
-					res := cur.list.PopFront().(RESP).Encode()
-					SettleClient(ev.client, listKey, res)
+					res := Array{[]RESP{
+						BulkString{listKey},
+					}}
+					res.elements = append(res.elements, cur.list.PopFront().(RESP))
+					SettleClient(ev.client, listKey, res.Encode())
 				}
 			case "LRANGE":
 				listKey := msg.elements[1].(BulkString).content
@@ -261,7 +322,7 @@ func (s *Store) HandleEvent(ev Event) error {
 					end = max(end+cur.list.Len(), 0)
 				}
 				end = min(end, cur.list.Len()-1)
-				log.Printf("LRANGE: [%d, %d]", start, end)
+				log.Printf("[INFO] LRANGE: [%d, %d]", start, end)
 
 				res := Array{
 					elements: make([]RESP, end-start+1),
@@ -281,15 +342,28 @@ func (s *Store) HandleEvent(ev Event) error {
 				}
 				SettleClient(ev.client, listKey, res.Encode())
 			default:
-				panic(fmt.Sprintf("Unknown command: %v", cmd.content))
+				panic(fmt.Sprintf("[ERROR] Unknown command: %v", cmd.content))
 			}
 		} else {
-			panic("Command should be a bulk string")
+			panic("[ERROR] Command should be a bulk string")
 		}
 	default:
-		return fmt.Errorf("unknown event: %v", ev)
+		return fmt.Errorf("[ERROR] Unknown event: %v", ev)
 	}
 	return nil
+}
+
+func ToFloat(v RESP) float64 {
+	switch raw := v.(type) {
+	case BulkString:
+		val, err := strconv.ParseFloat(raw.content, 64)
+		if err != nil {
+			panic(fmt.Sprintf("[ERROR] Error parsing value: %v", v))
+		}
+		return val
+	default:
+		panic(fmt.Sprintf("[ERROR] Cannot parsing value: %v", v))
+	}
 }
 
 func ToInt(v RESP) int {
@@ -297,12 +371,12 @@ func ToInt(v RESP) int {
 	case BulkString:
 		val, err := strconv.Atoi(raw.content)
 		if err != nil {
-			panic(fmt.Sprintf("Error parsing value: %v", v))
+			panic(fmt.Sprintf("[ERROR] Error parsing value: %v", v))
 		}
 		return val
 	case Integer:
 		return int(raw.content)
 	default:
-		panic(fmt.Sprintf("Cannot parsing value: %v", v))
+		panic(fmt.Sprintf("[ERROR] Cannot parsing value: %v", v))
 	}
 }

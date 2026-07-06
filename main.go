@@ -25,8 +25,8 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	events := make(chan Event)
-	store := NewStore()
-	go store.Start(ctx, events)
+	store := NewStore(events)
+	go store.Start(ctx)
 
 	for {
 		conn, err := l.Accept()
@@ -34,6 +34,7 @@ func main() {
 			fmt.Println("Error accepting connection: ", err.Error())
 			continue
 		}
+
 		go func() {
 			scanner := bufio.NewScanner(conn)
 			scanner.Split(split)
@@ -41,19 +42,19 @@ func main() {
 			respCh := make(chan Client)
 			for scanner.Scan() {
 				data := scanner.Bytes()
-				log.Printf("Received line(%v): %v", conn.RemoteAddr(), data)
+				log.Printf("[INFO] Received line(%v): %v", conn.RemoteAddr(), data)
 
 				msg, err := decoder.Decode(data)
 				if err != nil {
-					log.Printf("Error decoding data(%v): %v", conn.RemoteAddr(), err)
+					log.Printf("[ERROR] Error decoding data(%v): %v", conn.RemoteAddr(), err)
 					os.Exit(1)
 				}
 
 				switch msg := msg.(type) {
 				case BulkString:
-					log.Printf("message(bulk string): %v", msg)
+					log.Printf("[INFO] Message(bulk string): %v", msg)
 				case Array:
-					log.Printf("message(array): %v", msg)
+					log.Printf("[INFO] Message(array): %#v", msg)
 					events <- Event{Type: EventCmd, data: msg, client: respCh}
 					resp := <-respCh
 					status := resp.status
@@ -61,23 +62,23 @@ func main() {
 					case []byte:
 						_, err := conn.Write(s)
 						if err != nil {
-							log.Printf("Error writing to connection %v: %v", conn.RemoteAddr(), err.Error())
+							log.Printf("[ERROR] Error writing to connection %v: %v", conn.RemoteAddr(), err.Error())
 							os.Exit(1)
 						}
 					case BlockingListStatus:
 						data := <-s.data
 						_, err := conn.Write(data)
 						if err != nil {
-							log.Printf("Error writing to connection %v: %v", conn.RemoteAddr(), err.Error())
+							log.Printf("[ERROR] Error writing to connection %v: %v", conn.RemoteAddr(), err.Error())
 							os.Exit(1)
 						}
 					}
 				default:
-					panic("Unknown message type")
+					panic("[ERROR] Unknown message type")
 				}
 			}
 			if err := scanner.Err(); err != nil {
-				fmt.Println("Error reading from connection: ", err.Error())
+				fmt.Println("[ERROR] Error reading from connection: ", err.Error())
 				os.Exit(1)
 			}
 		}()
