@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"fmt"
 	"strconv"
+	"strings"
 )
 
 type RESP interface {
@@ -23,15 +24,50 @@ type BulkString struct {
 	content string
 }
 
+type SimpleError struct {
+	msg string
+}
+
+type EntryId string
+
+func (a EntryId) Validate() (bool, int64, int64) {
+	ida := strings.SplitN(string(a), "-", 2)
+	if len(ida) < 2 {
+		return false, 0, 0
+	}
+	ts, err := strconv.ParseInt(ida[0], 10, 64)
+	if err != nil {
+		return false, 0, 0
+	}
+	id, err := strconv.ParseInt(ida[1], 10, 64)
+	if err != nil {
+		return false, 0, 0
+	}
+	return true, ts, id
+}
+
+func (a EntryId) Greater(b EntryId) bool {
+	v1, ts1, id1 := a.Validate()
+	v2, ts2, id2 := b.Validate()
+	if !v1 || !v2 {
+		return false
+	}
+	if ts1 == ts2 {
+		return id1 > id2
+	}
+	return ts1 > ts2
+}
+
 type Entry struct {
-	id    string
+	id    EntryId
 	key   string
 	value string
 }
 
 type Stream struct {
 	key     string
-	entries []*Entry
+	entries map[string]*Entry
+	lastId  EntryId
 }
 
 type Decoder struct {
@@ -75,6 +111,10 @@ func (arr Array) Encode() []byte {
 		res = append(res, a.Encode()...)
 	}
 	return res
+}
+
+func (err SimpleError) Encode() []byte {
+	return []byte("-" + err.msg + "\r\n")
 }
 
 func (d *Decoder) Decode(data []byte) (RESP, error) {
