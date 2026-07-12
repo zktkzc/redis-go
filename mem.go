@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -168,6 +170,55 @@ func (s *Store) HandleEvent(ev Event) error {
 		msg := ev.data.(Array)
 		if cmd, ok := msg.elements[0].(BulkString); ok {
 			switch command := strings.ToUpper(cmd.content); command {
+			case "XRANGE":
+				streamKey := msg.elements[1].(BulkString).content
+				start := msg.elements[2].(BulkString).content
+				end := msg.elements[3].(BulkString).content
+
+				_, ts1, seq1 := EntryID(start).Validate()
+				_, ts2, seq2 := EntryID(end).Validate()
+				if seq1 == -1 {
+					start = strconv.Itoa(int(ts1)) + "-0"
+				}
+				if seq2 == -1 {
+					end = strconv.Itoa(int(ts2)) + "-" + strconv.Itoa(int(math.MaxInt64))
+				} else {
+					end = strconv.Itoa(int(ts2)) + "-" + strconv.Itoa(int(seq2+1))
+				}
+
+				val, t := s.GetRawValue(streamKey)
+				if val == nil {
+					SettleClient(ev.client, streamKey, nullBulkString)
+					return nil
+				} else {
+					if t != "stream" {
+						panic(fmt.Sprintf("[ERROR] XADD: %v is %s, not 'stream'", streamKey, t))
+					}
+				}
+
+				stream := s.store[streamKey].data.(*Stream)
+				sortedEntries := make([]*Entry, 0, len(stream.entries))
+				for _, v := range stream.entries {
+					sortedEntries = append(sortedEntries, v)
+				}
+				sort.Slice(sortedEntries, func(i, j int) bool {
+					return !sortedEntries[i].id.GreaterOrEqual(sortedEntries[j].id)
+				})
+				i := sort.Search(len(sortedEntries), func(k int) bool {
+					return sortedEntries[k].id.GreaterOrEqual(EntryID(start))
+				})
+				j := sort.Search(len(sortedEntries), func(k int) bool {
+					return sortedEntries[k].id.GreaterOrEqual(EntryID(end))
+				})
+				res := sortedEntries[i:j]
+				elements := make([]RESP, len(res))
+				for k, ent := range res {
+					elements[k] = ent.ToArray()
+				}
+				SettleClient(ev.client, streamKey, Array{
+					elements: elements,
+				}.Encode())
+				return nil
 			case "XADD":
 				streamKey := msg.elements[1].(BulkString).content
 				id := msg.elements[2].(BulkString).content
@@ -190,15 +241,22 @@ func (s *Store) HandleEvent(ev Event) error {
 					SettleClient(ev.client, streamKey, SimpleError{"ERR The ID specified in XADD must be greater than 0-0"}.Encode())
 					return nil
 				}
-				key := msg.elements[3].(BulkString).content
-				value := msg.elements[4].(BulkString).content
+
 				if !eid.Greater(stream.lastID) {
 					SettleClient(ev.client, "", SimpleError{"ERR the ID specified in XADD is euqal or smaller than the target stream top item"}.Encode())
 					return nil
 				}
-
-				stream.entries[id] = &Entry{eid, key, value}
 				stream.lastID = eid
+
+				stream.entries[string(eid)] = &Entry{
+					id:    eid,
+					pairs: []Pair{},
+				}
+				for i := 3; i+1 < len(msg.elements); i += 2 {
+					key := msg.elements[i].(BulkString).content
+					value := msg.elements[i+1].(BulkString).content
+					stream.entries[string(eid)].pairs = append(stream.entries[string(eid)].pairs, Pair{key, value})
+				}
 				SettleClient(ev.client, "", BulkString{string(eid)}.Encode())
 			case "PING":
 				SettleClient(ev.client, "", []byte("+PONG\r\n"))

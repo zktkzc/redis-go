@@ -70,15 +70,31 @@ func (a EntryID) AutoGenID(lastID EntryID) (EidGenType, EntryID) {
 func (a EntryID) Validate() (bool, int64, int64) {
 	ida := strings.SplitN(string(a), "-", 2)
 	if len(ida) < 2 {
-		return false, 0, 0
+		if ida[0] != "*" {
+			ts, err := strconv.ParseInt(ida[0], 10, 64)
+			if err != nil {
+				return false, -1, -1
+			}
+			return true, ts, -1
+		}
+		// for id = "*"
+		return true, -1, -1
 	}
 	ts, err := strconv.ParseInt(ida[0], 10, 64)
 	if err != nil {
-		return false, 0, 0
+		return false, -1, -1
 	}
 	id, err := strconv.ParseInt(ida[1], 10, 64)
+	if err != nil && ida[1] != "*" {
+		sid, err := strconv.ParseInt(ida[1], 10, 64)
+		if err != nil && ida[1] != "*" {
+			return false, -1, -1
+		}
+		return true, ts, sid
+	}
 	if err != nil {
-		return false, 0, 0
+		// for id = ts-*
+		id = -1
 	}
 	return true, ts, id
 }
@@ -95,10 +111,39 @@ func (a EntryID) Greater(b EntryID) bool {
 	return ts1 > ts2
 }
 
-type Entry struct {
-	id    EntryID
+func (a EntryID) GreaterOrEqual(b EntryID) bool {
+	v1, ts1, id1 := a.Validate()
+	v2, ts2, id2 := b.Validate()
+	if !v1 || !v2 {
+		return false
+	}
+	if ts1 == ts2 {
+		return id1 >= id2
+	}
+	return ts1 >= ts2
+}
+
+type Pair struct {
 	key   string
 	value string
+}
+
+type Entry struct {
+	id    EntryID
+	pairs []Pair
+}
+
+func (e *Entry) String() string {
+	return string(e.id)
+}
+
+func (e Entry) ToArray() RESP {
+	id := BulkString{string(e.id)}
+	els := Array{}
+	for _, p := range e.pairs {
+		els.elements = append(els.elements, BulkString{p.key}, BulkString{p.value})
+	}
+	return Array{elements: []RESP{id, els}}
 }
 
 type Stream struct {
