@@ -172,57 +172,69 @@ func (s *Store) HandleEvent(ev Event) error {
 			switch command := strings.ToUpper(cmd.content); command {
 			case "XREAD":
 				_ = msg.elements[1].(BulkString).content
-				streamKey := msg.elements[2].(BulkString).content
-				id := msg.elements[3].(BulkString).content
-
-				_, ts, seq := EntryID(id).Validate()
-				if ts == -1 {
-					if id != "-" {
-						SettleClient(ev.client, streamKey, SimpleError{"ERR Invalid <start> for XRANGE"})
-					} else {
-						ts = 0
-					}
-				}
-				if seq == -1 {
-					id = strconv.Itoa(int(ts)) + "-0"
-				}
-
-				val, t := s.GetRawValue(streamKey)
-				if val == nil {
-					SettleClient(ev.client, streamKey, nullBulkString)
-					return nil
-				} else {
-					if t != "stream" {
-						panic(fmt.Sprintf("[ERROR] XADD: %v is %s, not 'stream'", streamKey, t))
-					}
-				}
-
-				stream := s.store[streamKey].data.(*Stream)
-				sortedEntries := make([]*Entry, 0, len(stream.entries))
-				for _, v := range stream.entries {
-					sortedEntries = append(sortedEntries, v)
-				}
-				sort.Slice(sortedEntries, func(i, j int) bool {
-					return !sortedEntries[i].id.GreaterOrEqual(sortedEntries[j].id)
-				})
-				i := sort.Search(len(sortedEntries), func(k int) bool {
-					return sortedEntries[k].id.Greater(EntryID(id))
-				})
-				res := sortedEntries[i:]
-				elements := make([]RESP, len(res))
-				for k, ent := range res {
-					elements[k] = ent.ToArray()
-				}
+				keys := []string{}
+				ids := []string{}
 				result := Array{elements: []RESP{}}
-				result.elements = append(result.elements, Array{
-					elements: []RESP{
-						BulkString{streamKey},
-						Array{
-							elements: elements,
+				nums := len(msg.elements[2:]) / 2
+				for i := range nums {
+					i = i + 2
+					key := msg.elements[i].(BulkString).content
+					id := msg.elements[i+nums].(BulkString).content
+					keys = append(keys, key)
+					ids = append(ids, id)
+				}
+				log.Printf("keys: %v, ids: %v, nums: %v", keys, ids, nums)
+
+				for k, streamKey := range keys {
+					id := ids[k]
+					_, ts, seq := EntryID(id).Validate()
+					if ts == -1 {
+						if id != "-" {
+							SettleClient(ev.client, streamKey, SimpleError{"ERR Invalid <start> for XREAD"})
+						} else {
+							ts = 0
+						}
+					}
+					if seq == -1 {
+						id = strconv.Itoa(int(ts)) + "-0"
+					}
+
+					val, t := s.GetRawValue(streamKey)
+					if val == nil {
+						SettleClient(ev.client, streamKey, nullBulkString)
+						return nil
+					} else {
+						if t != "stream" {
+							panic(fmt.Sprintf("[ERROR] XADD: %v is %s, not 'stream'", streamKey, t))
+						}
+					}
+
+					stream := s.store[streamKey].data.(*Stream)
+					sortedEntries := make([]*Entry, 0, len(stream.entries))
+					for _, v := range stream.entries {
+						sortedEntries = append(sortedEntries, v)
+					}
+					sort.Slice(sortedEntries, func(i, j int) bool {
+						return !sortedEntries[i].id.GreaterOrEqual(sortedEntries[j].id)
+					})
+					i := sort.Search(len(sortedEntries), func(k int) bool {
+						return sortedEntries[k].id.Greater(EntryID(id))
+					})
+					res := sortedEntries[i:]
+					elements := make([]RESP, len(res))
+					for k, ent := range res {
+						elements[k] = ent.ToArray()
+					}
+					result.elements = append(result.elements, Array{
+						elements: []RESP{
+							BulkString{streamKey},
+							Array{
+								elements: elements,
+							},
 						},
-					},
-				})
-				SettleClient(ev.client, streamKey, result.Encode())
+					})
+				}
+				SettleClient(ev.client, "XREAD STREAM", result.Encode())
 				return nil
 			case "XRANGE":
 				streamKey := msg.elements[1].(BulkString).content
