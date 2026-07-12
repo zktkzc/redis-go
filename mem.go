@@ -177,8 +177,23 @@ func (s *Store) HandleEvent(ev Event) error {
 
 				_, ts1, seq1 := EntryID(start).Validate()
 				_, ts2, seq2 := EntryID(end).Validate()
+				if ts1 == -1 {
+					if start != "-" {
+						SettleClient(ev.client, streamKey, SimpleError{"ERR Invalid <start> for XRANGE"})
+					} else {
+						ts1 = 0
+					}
+				}
 				if seq1 == -1 {
 					start = strconv.Itoa(int(ts1)) + "-0"
+				}
+
+				if ts2 == -1 {
+					if end != "+" {
+						SettleClient(ev.client, streamKey, SimpleError{"ERR Invalid <end> for XRANGE"})
+					} else {
+						ts2 = math.MaxInt64
+					}
 				}
 				if seq2 == -1 {
 					end = strconv.Itoa(int(ts2)) + "-" + strconv.Itoa(int(math.MaxInt64))
